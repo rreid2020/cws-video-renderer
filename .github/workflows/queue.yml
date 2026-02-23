@@ -16,7 +16,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth google-auth-httplib2
@@ -25,7 +30,6 @@ jobs:
         run: mkdir -p out
 
       - name: Pick next NEW topic -> PROCESSING
-        id: pick
         env:
           GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
@@ -41,41 +45,37 @@ jobs:
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
           python - << 'PY'
-          import json
-          import re
-          import pathlib
-          import subprocess
-          import sys
+          import json, re, pathlib, subprocess, sys
 
-          log_path = pathlib.Path("out/picked.log")
-          if not log_path.exists():
-              print("No picked.log found. Exiting.")
-              sys.exit(0)
-
-          log = log_path.read_text(encoding="utf-8")
-
-          match = re.search(r'(\{[\s\S]*\})', log)
-          if not match:
+          log = pathlib.Path("out/picked.log").read_text(encoding="utf-8")
+          m = re.search(r'(\{[\s\S]*\})', log)
+          if not m:
               print("No NEW topic found. Nothing to process.")
               sys.exit(0)
 
-          picked = json.loads(match.group(1))
-
+          picked = json.loads(m.group(1))
           row = picked["sheet_row"]
           topic = picked["topic"]
 
-          print(f"Generating content for row {row}...")
-          subprocess.check_call([
-              "python", "src/openai_generate.py",
-              "--topic", topic,
-              "--out", "out/generated.json"
-          ])
+          subprocess.check_call(["python", "src/openai_generate.py", "--topic", topic, "--out", "out/generated.json"])
+          subprocess.check_call(["python", "src/sheets_update_processing.py", "--row", str(row), "--json", "out/generated.json"])
 
-          subprocess.check_call([
-              "python", "src/sheets_update_processing.py",
-              "--row", str(row),
-              "--json", "out/generated.json"
-          ])
-
-          print("✅ Content written back to sheet.")
+          # write row number for downstream steps
+          pathlib.Path("out/row.json").write_text(json.dumps({"row": row}, indent=2), encoding="utf-8")
           PY
+
+      - name: TTS (script -> voice.mp3)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python src/tts_openai.py --json out/generated.json --out out/voice.mp3
+
+      - name: Render MP4 (FFmpeg)
+        run: |
+          python src/render_short.py --json out/generated.json --audio out/voice.mp3 --out out/video.mp4
+
+      - name: Upload artifact (video)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: out/video.mp4
