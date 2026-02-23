@@ -2,15 +2,13 @@ name: Queue - Pick Next Topic
 
 on:
   workflow_dispatch: {}
-  # Optional schedule later:
-  # schedule:
-  #   - cron: "0 * * * *"  # hourly
 
 jobs:
-  pick_next:
+  queue_process:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -18,15 +16,66 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install google-api-python-client google-auth google-auth-httplib2
+
+      - name: Create output folder
+        run: mkdir -p out
 
       - name: Pick next NEW topic -> PROCESSING
+        id: pick
         env:
           GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
-          python src/sheets_queue.py
+          python src/sheets_queue.py | tee out/picked.log
+
+      - name: Generate script + metadata and write back to sheet
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_TAB: ${{ secrets.SHEET_TAB }}
+        run: |
+          python - << 'PY'
+          import json
+          import re
+          import pathlib
+          import subprocess
+          import sys
+
+          log_path = pathlib.Path("out/picked.log")
+          if not log_path.exists():
+              print("No picked.log found. Exiting.")
+              sys.exit(0)
+
+          log = log_path.read_text(encoding="utf-8")
+
+          match = re.search(r'(\{[\s\S]*\})', log)
+          if not match:
+              print("No NEW topic found. Nothing to process.")
+              sys.exit(0)
+
+          picked = json.loads(match.group(1))
+
+          row = picked["sheet_row"]
+          topic = picked["topic"]
+
+          print(f"Generating content for row {row}...")
+          subprocess.check_call([
+              "python", "src/openai_generate.py",
+              "--topic", topic,
+              "--out", "out/generated.json"
+          ])
+
+          subprocess.check_call([
+              "python", "src/sheets_update_processing.py",
+              "--row", str(row),
+              "--json", "out/generated.json"
+          ])
+
+          print("✅ Content written back to sheet.")
+          PY
