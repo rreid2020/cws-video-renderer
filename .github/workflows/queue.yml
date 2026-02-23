@@ -16,6 +16,14 @@ jobs:
         with:
           python-version: "3.11"
 
+       - name: Network sanity check
+        run: |
+          set -eux
+          uname -a
+          python --version || true
+          curl -I https://github.com
+          curl -I http://archive.ubuntu.com/ubuntu/
+
       - name: Install FFmpeg
         run: |
           sudo apt-get update
