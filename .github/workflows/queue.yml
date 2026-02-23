@@ -24,10 +24,25 @@ jobs:
           curl -I https://github.com
           curl -I http://archive.ubuntu.com/ubuntu/
 
-      - name: Install FFmpeg
+            - name: Install FFmpeg (robust)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Sometimes apt is locked briefly on GitHub runners
+          sudo apt-get update -y
+
+          # Retry install up to 3 times to survive mirror hiccups
+          for i in 1 2 3; do
+            if sudo apt-get install -y ffmpeg; then
+              break
+            fi
+            echo "ffmpeg install failed (attempt $i). Retrying in 10s..."
+            sleep 10
+            sudo apt-get update -y
+          done
+
+          ffmpeg -version
 
       - name: Install Python deps
         run: |
