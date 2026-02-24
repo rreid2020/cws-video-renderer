@@ -4,7 +4,109 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  queue_process:
+    runs-on: ubuntu-22.04
+
     steps:
-      - run: echo "Queue workflow is visible"
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth google-auth-httplib2 requests
+
+      - name: Create output directory
+        run: mkdir -p out
+
+      - name: Pick next NEW topic
+        env:
+          GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_TAB: ${{ secrets.SHEET_TAB }}
+        run: |
+          python src/sheets_queue.py > out/picked.log
+
+      - name: Extract picked row
+        id: extract
+        run: |
+          python - <<EOF
+import json, re, pathlib, sys
+
+log = pathlib.Path("out/picked.log").read_text(encoding="utf-8")
+match = re.search(r'(\{[\s\S]*\})', log)
+
+if not match:
+    print("No NEW topic found.")
+    sys.exit(0)
+
+data = json.loads(match.group(1))
+pathlib.Path("out/row.json").write_text(json.dumps(data), encoding="utf-8")
+print("Picked row:", data["sheet_row"])
+EOF
+
+      - name: Generate script via OpenAI
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python - <<EOF
+import json, subprocess
+
+picked = json.load(open("out/row.json"))
+topic = picked["topic"]
+
+subprocess.check_call([
+    "python", "src/openai_generate.py",
+    "--topic", topic,
+    "--out", "out/generated.json"
+])
+EOF
+
+      - name: Write script back to sheet
+        env:
+          GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_TAB: ${{ secrets.SHEET_TAB }}
+        run: |
+          python - <<EOF
+import json, subprocess
+
+picked = json.load(open("out/row.json"))
+row = picked["sheet_row"]
+
+subprocess.check_call([
+    "python", "src/sheets_update_processing.py",
+    "--row", str(row),
+    "--json", "out/generated.json"
+])
+EOF
+
+      - name: Generate TTS audio
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python src/tts_openai.py --json out/generated.json --out out/voice.mp3
+
+      - name: Render vertical video
+        run: |
+          python src/render_short.py \
+            --json out/generated.json \
+            --audio out/voice.mp3 \
+            --out out/video.mp4
+
+      - name: Upload rendered video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: out/video.mp4
