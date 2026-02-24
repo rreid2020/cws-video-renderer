@@ -18,14 +18,17 @@ jobs:
 
       - name: Install FFmpeg
         run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
           sudo apt-get install -y ffmpeg
           ffmpeg -version
 
       - name: Install Python dependencies
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
-          pip install google-api-python-client google-auth google-auth-httplib2 requests
+          pip install google-api-python-client google-auth google-auth-httplib2
 
       - name: Create output directory
         run: mkdir -p out
@@ -36,76 +39,65 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
+          set -euxo pipefail
           python src/sheets_queue.py > out/picked.log
 
-      - name: Extract picked row
+      - name: Extract picked row (set outputs)
         id: extract
         run: |
-          python - <<EOF
-import json, re, pathlib, sys
-
-log = pathlib.Path("out/picked.log").read_text(encoding="utf-8")
-match = re.search(r'(\{[\s\S]*\})', log)
-
-if not match:
-    print("No NEW topic found.")
-    sys.exit(0)
-
-data = json.loads(match.group(1))
-pathlib.Path("out/row.json").write_text(json.dumps(data), encoding="utf-8")
-print("Picked row:", data["sheet_row"])
-EOF
+          set -euxo pipefail
+          python -c "import json,re,pathlib,os,sys; \
+log=pathlib.Path('out/picked.log').read_text(encoding='utf-8'); \
+m=re.search(r'(\{[\\s\\S]*\})',log); \
+out=os.environ['GITHUB_OUTPUT']; \
+p=pathlib.Path('out/row.json'); \
+\
+if not m: \
+  open(out,'a',encoding='utf-8').write('found=false\\n'); \
+  print('No NEW topic found.'); \
+  sys.exit(0); \
+\
+data=json.loads(m.group(1)); \
+p.write_text(json.dumps(data),encoding='utf-8'); \
+open(out,'a',encoding='utf-8').write('found=true\\n'); \
+open(out,'a',encoding='utf-8').write(f\"row={data['sheet_row']}\\n\"); \
+open(out,'a',encoding='utf-8').write(f\"topic={data['topic']}\\n\"); \
+print('Picked row:', data['sheet_row'])"
 
       - name: Generate script via OpenAI
+        if: steps.extract.outputs.found == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python - <<EOF
-import json, subprocess
-
-picked = json.load(open("out/row.json"))
-topic = picked["topic"]
-
-subprocess.check_call([
-    "python", "src/openai_generate.py",
-    "--topic", topic,
-    "--out", "out/generated.json"
-])
-EOF
+          set -euxo pipefail
+          python src/openai_generate.py --topic "${{ steps.extract.outputs.topic }}" --out out/generated.json
 
       - name: Write script back to sheet
+        if: steps.extract.outputs.found == 'true'
         env:
           GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
-          python - <<EOF
-import json, subprocess
-
-picked = json.load(open("out/row.json"))
-row = picked["sheet_row"]
-
-subprocess.check_call([
-    "python", "src/sheets_update_processing.py",
-    "--row", str(row),
-    "--json", "out/generated.json"
-])
-EOF
+          set -euxo pipefail
+          python src/sheets_update_processing.py --row "${{ steps.extract.outputs.row }}" --json out/generated.json
 
       - name: Generate TTS audio
+        if: steps.extract.outputs.found == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          set -euxo pipefail
           python src/tts_openai.py --json out/generated.json --out out/voice.mp3
 
       - name: Render vertical video
+        if: steps.extract.outputs.found == 'true'
         run: |
-          python src/render_short.py \
-            --json out/generated.json \
-            --audio out/voice.mp3 \
-            --out out/video.mp4
+          set -euxo pipefail
+          python src/render_short.py --json out/generated.json --audio out/voice.mp3 --out out/video.mp4
 
       - name: Upload rendered video artifact
+        if: steps.extract.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: rendered-video
