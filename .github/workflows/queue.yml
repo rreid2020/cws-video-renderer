@@ -28,6 +28,8 @@ jobs:
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip
+          # Prefer requirements.txt if you have it
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install google-api-python-client google-auth google-auth-httplib2
 
       - name: Create output directory
@@ -42,27 +44,11 @@ jobs:
           set -euxo pipefail
           python src/sheets_queue.py > out/picked.log
 
-      - name: Extract picked row (set outputs)
+      - name: Extract picked row (outputs)
         id: extract
         run: |
           set -euxo pipefail
-          python -c "import json,re,pathlib,os,sys; \
-log=pathlib.Path('out/picked.log').read_text(encoding='utf-8'); \
-m=re.search(r'(\{[\\s\\S]*\})',log); \
-out=os.environ['GITHUB_OUTPUT']; \
-p=pathlib.Path('out/row.json'); \
-\
-if not m: \
-  open(out,'a',encoding='utf-8').write('found=false\\n'); \
-  print('No NEW topic found.'); \
-  sys.exit(0); \
-\
-data=json.loads(m.group(1)); \
-p.write_text(json.dumps(data),encoding='utf-8'); \
-open(out,'a',encoding='utf-8').write('found=true\\n'); \
-open(out,'a',encoding='utf-8').write(f\"row={data['sheet_row']}\\n\"); \
-open(out,'a',encoding='utf-8').write(f\"topic={data['topic']}\\n\"); \
-print('Picked row:', data['sheet_row'])"
+          python src/extract_picked.py
 
       - name: Generate script via OpenAI
         if: steps.extract.outputs.found == 'true'
