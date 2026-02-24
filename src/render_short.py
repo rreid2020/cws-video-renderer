@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 import subprocess
 from pathlib import Path
 from typing import List, Tuple
@@ -17,7 +16,6 @@ def run(cmd: List[str]) -> None:
 
 
 def ffprobe_duration(audio_path: str) -> float:
-    # Returns duration in seconds (float)
     out = subprocess.check_output(
         [
             "ffprobe",
@@ -31,8 +29,19 @@ def ffprobe_duration(audio_path: str) -> float:
     return float(out)
 
 
+def normalize_quotes(text: str) -> str:
+    # Replace curly quotes/apostrophes with ASCII (drawtext is picky)
+    return (
+        text.replace("’", "'")
+            .replace("‘", "'")
+            .replace("“", '"')
+            .replace("”", '"')
+    )
+
+
 def escape_drawtext(text: str) -> str:
     # Escape for FFmpeg drawtext
+    text = normalize_quotes(text)
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
     text = text.replace("'", "\\'")
@@ -42,7 +51,6 @@ def escape_drawtext(text: str) -> str:
 
 
 def wrap_title(title: str, max_chars: int = 28) -> str:
-    # Simple word-wrap into 1–3 lines
     words = title.split()
     lines = []
     cur = ""
@@ -55,30 +63,25 @@ def wrap_title(title: str, max_chars: int = 28) -> str:
             cur = w
     if cur:
         lines.append(cur)
-    # Limit to 3 lines; if longer, merge tail
     if len(lines) > 3:
         lines = lines[:2] + [" ".join(lines[2:])]
     return "\n".join(lines)
 
 
 def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
-    # Split on sentences first; then merge into ~target_chunks blocks
-    s = script.strip()
+    s = normalize_quotes(script.strip())
+    if not s:
+        return []
 
-    # remove disclaimer from captions if present (keep it in audio)
-    # We'll try to keep last sentence, but captions look better without a legal line.
-    # If you WANT the disclaimer on screen later, we can add it as final chunk.
+    # sentence-ish split
     parts = [p.strip() for p in s.replace("?", "?.").replace("!", "!.").split(".") if p.strip()]
-    sentences = [p if p.endswith(("?", "!", ".")) else p for p in parts]
-    if len(sentences) <= 1:
+    if len(parts) <= 1:
         return [s]
 
-    # Merge sentences into chunk blocks
     chunks: List[str] = []
     cur = ""
-    for sent in sentences:
+    for sent in parts:
         candidate = (cur + " " + sent).strip()
-        # keep blocks readable
         if len(candidate) <= 170:
             cur = candidate
         else:
@@ -88,38 +91,32 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if cur:
         chunks.append(cur)
 
-    # If too many chunks, merge nearest until target
     while len(chunks) > target_chunks:
-        # merge the two smallest adjacent chunks
-        best_i = None
-        best_len = None
+        best_i = 0
+        best_len = 10**9
         for i in range(len(chunks) - 1):
             merged_len = len(chunks[i]) + len(chunks[i + 1])
-            if best_len is None or merged_len < best_len:
+            if merged_len < best_len:
                 best_len = merged_len
                 best_i = i
-        i = best_i if best_i is not None else 0
-        chunks[i] = (chunks[i] + " " + chunks[i + 1]).strip()
-        del chunks[i + 1]
+        chunks[best_i] = (chunks[best_i] + " " + chunks[best_i + 1]).strip()
+        del chunks[best_i + 1]
 
     return chunks
 
 
 def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, tail_out: float = 0.2) -> List[Tuple[float, float]]:
-    # Allocate time proportionally to word counts
     available = max(0.5, total_dur - lead_in - tail_out)
-    weights = []
-    for c in chunks:
-        weights.append(max(3, len(c.split())))
+    weights = [max(3, len(c.split())) for c in chunks]
+    wsum = sum(weights) if weights else 1
 
-    wsum = sum(weights)
     timings = []
     t = lead_in
     for w in weights:
         dt = available * (w / wsum)
         timings.append((t, t + dt))
         t += dt
-    # Clamp last end
+
     if timings:
         timings[-1] = (timings[-1][0], min(total_dur - 0.05, timings[-1][1]))
     return timings
@@ -136,22 +133,13 @@ def main():
     title = data.get("youtube_title") or "Canadian Finance"
     script = data.get("script") or ""
 
-    dur = ffprobe_duration(args.audio)
-    dur = float(max(8.0, dur))
+    dur = max(8.0, ffprobe_duration(args.audio))
 
-    title_wrapped = wrap_title(title, max_chars=28)
+    title_wrapped = wrap_title(normalize_quotes(title), max_chars=28)
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
-    # ----- Background (animated gradient + subtle noise + slow zoom) -----
-    # We create two color layers and blend them with moving opacity, then add light noise.
-    # This keeps it professional (not flashy).
-    #
-    # Base inputs:
-    #   [0:v] = color #0B1F33
-    #   [1:v] = color #081827
-    #
-    # Then blend w/ a time-varying factor, add noise, and a tiny zoom/pan illusion using scale+crop.
+    # Animated pro background: subtle blend + noise + drift
     bg = (
         f"[0:v][1:v]blend=all_expr='A*(0.55+0.15*sin(2*PI*t/{dur})) + B*(0.45-0.15*sin(2*PI*t/{dur}))',"
         f"noise=alls=12:allf=t+u,"
@@ -159,7 +147,6 @@ def main():
         f"[bg]"
     )
 
-    # ----- Title block (top safe, centered, boxed) -----
     safe_title = escape_drawtext(title_wrapped)
     title_filter = (
         f"[bg]drawtext=fontfile={FONT_BOLD}:"
@@ -171,12 +158,11 @@ def main():
         f"[v1]"
     )
 
-    # ----- Caption block (changes over time) -----
-    # We'll draw one block per chunk with enable='between(t,start,end)'
+    # Caption blocks with properly escaped enable commas:
     caption_filters = []
-    for (chunk, (ts, te)) in zip(chunks, times):
+    for chunk, (ts, te) in zip(chunks, times):
         c = escape_drawtext(chunk)
-        # slightly smaller than title; placed mid-lower
+        enable_expr = f"between(t\\,{ts:.3f}\\,{te:.3f})"  # <-- key fix
         caption_filters.append(
             "drawtext="
             f"fontfile={FONT_REG}:"
@@ -185,27 +171,18 @@ def main():
             f"x=(w-text_w)/2:y=1120:"
             f"line_spacing=10:"
             f"box=1:boxcolor=black@0.28:boxborderw=22:"
-            f"enable='between(t,{ts:.3f},{te:.3f})'"
+            f"enable={enable_expr}"
         )
 
     captions_chain = ",".join(caption_filters) if caption_filters else "null"
 
-    # ----- Progress bar (bottom) -----
-    # Orange bar + subtle gray track. Width grows with time.
+    # Progress bar
     progress = (
         f"drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
         f"drawbox=x=120:y=h-140:w='(w-240)*t/{dur}':h=10:color=#FF7A18@0.95:t=fill"
     )
 
-    # Build full filter_complex
-    # Inputs:
-    # 0: color #0B1F33
-    # 1: color #081827
-    filter_complex = (
-        f"{bg};"
-        f"{title_filter};"
-        f"[v1]{captions_chain},{progress}[vout]"
-    )
+    filter_complex = f"{bg};{title_filter};[v1]{captions_chain},{progress}[vout]"
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
