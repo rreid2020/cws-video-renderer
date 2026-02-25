@@ -11,79 +11,142 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # -----------------------------
+      # Python
+      # -----------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # -----------------------------
+      # FFmpeg (stable install)
+      # -----------------------------
       - name: Install FFmpeg
         run: |
           set -euxo pipefail
-          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
           sudo apt-get install -y ffmpeg
           ffmpeg -version
 
+      # -----------------------------
+      # Python dependencies
+      # -----------------------------
       - name: Install Python dependencies
         run: |
-          set -euxo pipefail
           python -m pip install --upgrade pip
-          # Prefer requirements.txt if you have it
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install google-api-python-client google-auth google-auth-httplib2
+          pip install \
+            requests \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2 \
+            google-auth-oauthlib
 
-      - name: Create output directory
+      # -----------------------------
+      # Prepare output directory
+      # -----------------------------
+      - name: Create output folder
         run: mkdir -p out
 
-      - name: Pick next NEW topic
+      # -----------------------------
+      # Pick next NEW topic
+      # -----------------------------
+      - name: Pick next NEW topic -> PROCESSING
         env:
           GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
-          set -euxo pipefail
           python src/sheets_queue.py > out/picked.log
 
-      - name: Extract picked row (outputs)
-        id: extract
+      # -----------------------------
+      # Parse picked row
+      # -----------------------------
+      - name: Parse picked row
+        id: parse
         run: |
-          set -euxo pipefail
-          python src/extract_picked.py
+          python - <<EOF
+import json, re, pathlib, sys
 
-      - name: Generate script via OpenAI
-        if: steps.extract.outputs.found == 'true'
+log = pathlib.Path("out/picked.log").read_text(encoding="utf-8")
+m = re.search(r'(\{[\s\S]*\})', log)
+
+if not m:
+    print("No NEW topic found.")
+    sys.exit(0)
+
+picked = json.loads(m.group(1))
+pathlib.Path("out/row.json").write_text(json.dumps(picked), encoding="utf-8")
+print("Picked row:", picked["sheet_row"])
+EOF
+
+      # -----------------------------
+      # Generate script + metadata
+      # -----------------------------
+      - name: Generate script + metadata
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euxo pipefail
-          python src/openai_generate.py --topic "${{ steps.extract.outputs.topic }}" --out out/generated.json
+          python - <<EOF
+import json, subprocess
 
-      - name: Write script back to sheet
-        if: steps.extract.outputs.found == 'true'
+picked = json.load(open("out/row.json"))
+topic = picked["topic"]
+
+subprocess.check_call([
+    "python", "src/openai_generate.py",
+    "--topic", topic,
+    "--out", "out/generated.json"
+])
+EOF
+
+      # -----------------------------
+      # Write script back to Sheet
+      # -----------------------------
+      - name: Write script to sheet
         env:
           GOOGLE_SHEETS_SA_JSON: ${{ secrets.GOOGLE_SHEETS_SA_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TAB: ${{ secrets.SHEET_TAB }}
         run: |
-          set -euxo pipefail
-          python src/sheets_update_processing.py --row "${{ steps.extract.outputs.row }}" --json out/generated.json
+          python - <<EOF
+import json, subprocess
 
-      - name: Generate TTS audio
-        if: steps.extract.outputs.found == 'true'
+picked = json.load(open("out/row.json"))
+row = picked["sheet_row"]
+
+subprocess.check_call([
+    "python", "src/sheets_update_processing.py",
+    "--row", str(row),
+    "--json", "out/generated.json"
+])
+EOF
+
+      # -----------------------------
+      # Generate TTS voice.mp3
+      # -----------------------------
+      - name: Generate TTS voice
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euxo pipefail
-          python src/tts_openai.py --json out/generated.json --out out/voice.mp3
+          python src/tts_openai.py \
+            --json out/generated.json \
+            --out out/voice.mp3
 
-      - name: Render vertical video
-        if: steps.extract.outputs.found == 'true'
+      # -----------------------------
+      # Render vertical short
+      # -----------------------------
+      - name: Render vertical short (FFmpeg)
         run: |
-          set -euxo pipefail
-          python src/render_short.py --json out/generated.json --audio out/voice.mp3 --out out/video.mp4
+          python src/render_short.py \
+            --json out/generated.json \
+            --audio out/voice.mp3 \
+            --out out/video.mp4
 
+      # -----------------------------
+      # Upload artifact
+      # -----------------------------
       - name: Upload rendered video artifact
-        if: steps.extract.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: rendered-video
