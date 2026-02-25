@@ -30,7 +30,6 @@ def ffprobe_duration(audio_path: str) -> float:
 
 
 def normalize_quotes(text: str) -> str:
-    # Replace curly quotes/apostrophes with ASCII (drawtext is picky)
     return (
         text.replace("’", "'")
             .replace("‘", "'")
@@ -40,12 +39,15 @@ def normalize_quotes(text: str) -> str:
 
 
 def escape_drawtext(text: str) -> str:
-    # Escape for FFmpeg drawtext
     text = normalize_quotes(text)
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
     text = text.replace("'", "\\'")
     text = text.replace("%", "\\%")
+    text = text.replace(",", "\\,")   # critical
+    text = text.replace(";", "\\;")   # critical
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
     text = text.replace("\n", "\\n")
     return text
 
@@ -73,12 +75,12 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    # sentence-ish split
     parts = [p.strip() for p in s.replace("?", "?.").replace("!", "!.").split(".") if p.strip()]
+
     if len(parts) <= 1:
         return [s]
 
-    chunks: List[str] = []
+    chunks = []
     cur = ""
     for sent in parts:
         candidate = (cur + " " + sent).strip()
@@ -135,11 +137,11 @@ def main():
 
     dur = max(8.0, ffprobe_duration(args.audio))
 
-    title_wrapped = wrap_title(normalize_quotes(title), max_chars=28)
+    title_wrapped = wrap_title(title)
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
-    # Animated pro background: subtle blend + noise + drift
+    # Animated professional background
     bg = (
         f"[0:v][1:v]blend=all_expr='A*(0.55+0.15*sin(2*PI*t/{dur})) + B*(0.45-0.15*sin(2*PI*t/{dur}))',"
         f"noise=alls=12:allf=t+u,"
@@ -148,6 +150,7 @@ def main():
     )
 
     safe_title = escape_drawtext(title_wrapped)
+
     title_filter = (
         f"[bg]drawtext=fontfile={FONT_BOLD}:"
         f"text='{safe_title}':"
@@ -158,11 +161,10 @@ def main():
         f"[v1]"
     )
 
-    # Caption blocks with properly escaped enable commas:
     caption_filters = []
     for chunk, (ts, te) in zip(chunks, times):
         c = escape_drawtext(chunk)
-        enable_expr = f"between(t\\,{ts:.3f}\\,{te:.3f})"  # <-- key fix
+        enable_expr = f"between(t\\,{ts:.3f}\\,{te:.3f})"
         caption_filters.append(
             "drawtext="
             f"fontfile={FONT_REG}:"
@@ -176,7 +178,6 @@ def main():
 
     captions_chain = ",".join(caption_filters) if caption_filters else "null"
 
-    # Progress bar
     progress = (
         f"drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
         f"drawbox=x=120:y=h-140:w='(w-240)*t/{dur}':h=10:color=#FF7A18@0.95:t=fill"
