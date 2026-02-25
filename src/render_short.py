@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import List, Tuple
@@ -38,12 +39,31 @@ def normalize_quotes(text: str) -> str:
     )
 
 
-def escape_drawtext(text: str) -> str:
+def sanitize_text(text: str) -> str:
     """
-    Escape for FFmpeg drawtext when text is wrapped in single quotes:
-      text='...'
+    Remove characters that can break FFmpeg filter args (literal newlines, unicode separators, tabs).
+    We'll do our own wrapping with \n later.
     """
     text = normalize_quotes(text)
+
+    # normalize unicode line separators to regular newline, then strip them
+    text = text.replace("\u2028", "\n").replace("\u2029", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # remove literal newlines/tabs (FFmpeg filtergraph cannot contain raw newlines safely)
+    text = text.replace("\t", " ")
+    text = re.sub(r"\n+", " ", text)
+
+    # collapse repeated spaces
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
+def escape_drawtext(text: str) -> str:
+    """
+    Escape for FFmpeg drawtext when using text='...'
+    """
+    text = sanitize_text(text)
     text = text.replace("\\", "\\\\")
     text = text.replace("'", "\\'")
     text = text.replace(":", "\\:")
@@ -52,14 +72,21 @@ def escape_drawtext(text: str) -> str:
     text = text.replace(";", "\\;")
     text = text.replace("[", "\\[")
     text = text.replace("]", "\\]")
+    # we will insert \n in wrapping functions and then escape it here:
     text = text.replace("\n", "\\n")
     return text
 
 
-def wrap_title(title: str, max_chars: int = 28) -> str:
-    words = title.split()
-    lines = []
+def wrap_lines(text: str, max_chars: int, max_lines: int) -> str:
+    """
+    Word-wrap text into up to max_lines lines with max_chars each.
+    Returns a string with real '\n' newlines (later escaped to \\n).
+    """
+    text = sanitize_text(text)
+    words = text.split()
+    lines: List[str] = []
     cur = ""
+
     for w in words:
         if len(cur) + (1 if cur else 0) + len(w) <= max_chars:
             cur = (cur + " " + w).strip()
@@ -67,18 +94,31 @@ def wrap_title(title: str, max_chars: int = 28) -> str:
             if cur:
                 lines.append(cur)
             cur = w
+
     if cur:
         lines.append(cur)
-    if len(lines) > 3:
-        lines = lines[:2] + [" ".join(lines[2:])]
+
+    if len(lines) > max_lines:
+        lines = lines[: max_lines - 1] + [" ".join(lines[max_lines - 1 :])]
+
     return "\n".join(lines)
 
 
+def wrap_title(title: str) -> str:
+    return wrap_lines(title, max_chars=28, max_lines=3)
+
+
+def wrap_caption(text: str) -> str:
+    # captions can be a bit wider; keep to 3 lines max
+    return wrap_lines(text, max_chars=36, max_lines=3)
+
+
 def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
-    s = normalize_quotes(script.strip())
+    s = sanitize_text(script)
     if not s:
         return []
 
+    # sentence-ish split
     parts = [p.strip() for p in s.replace("?", "?.").replace("!", "!.").split(".") if p.strip()]
     if len(parts) <= 1:
         return [s]
@@ -112,7 +152,7 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
 
 def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, tail_out: float = 0.2) -> List[Tuple[float, float]]:
     available = max(0.5, total_dur - lead_in - tail_out)
-    weights = [max(3, len(c.split())) for c in chunks]
+    weights = [max(3, len(sanitize_text(c).split())) for c in chunks]
     wsum = sum(weights) if weights else 1
 
     timings = []
@@ -140,11 +180,11 @@ def main():
 
     dur = max(8.0, ffprobe_duration(args.audio))
 
-    title_wrapped = wrap_title(normalize_quotes(title), max_chars=28)
+    title_wrapped = wrap_title(title)
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
-    # Animated professional background (subtle)
+    # Animated professional background
     bg = (
         f"[0:v][1:v]blend=all_expr='A*(0.55+0.15*sin(2*PI*t/{dur})) + B*(0.45-0.15*sin(2*PI*t/{dur}))',"
         f"noise=alls=12:allf=t+u,"
@@ -164,13 +204,13 @@ def main():
         f"[v1]"
     )
 
-    # Captions: chain with labels + semicolons (NO commas between filters)
+    # Captions: chain with labels + semicolons (most robust)
     caption_chain_parts = []
     in_label = "v1"
     for i, (chunk, (ts, te)) in enumerate(zip(chunks, times), start=1):
         out_label = f"c{i}"
-        c = escape_drawtext(chunk)
-        # commas INSIDE expression are fine because we are not using comma-separated filter chains
+        wrapped = wrap_caption(chunk)             # <= creates safe '\n'
+        c = escape_drawtext(wrapped)              # <= escapes to \\n
         enable_expr = f"between(t,{ts:.3f},{te:.3f})"
         caption_chain_parts.append(
             f"[{in_label}]drawtext=fontfile={FONT_REG}:"
@@ -184,7 +224,7 @@ def main():
         )
         in_label = out_label
 
-    # Progress bar on final caption output
+    # Progress bar
     progress = (
         f"[{in_label}]drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
         f"drawbox=x=120:y=h-140:w='(w-240)*t/{dur}':h=10:color=#FF7A18@0.95:t=fill"
