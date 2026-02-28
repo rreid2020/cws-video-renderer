@@ -11,7 +11,7 @@ FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def run(cmd: List[str]) -> None:
+def run(cmd):
     print(" ".join(cmd))
     subprocess.check_call(cmd)
 
@@ -40,51 +40,21 @@ def normalize_quotes(text: str) -> str:
 
 
 def sanitize_text(text: str) -> str:
-    """
-    Remove characters that can break FFmpeg filter args (literal newlines, unicode separators, tabs).
-    We'll do our own wrapping with \n later.
-    """
-    text = normalize_quotes(text)
-
-    # normalize unicode line separators to regular newline, then strip them
+    text = normalize_quotes(text or "")
     text = text.replace("\u2028", "\n").replace("\u2029", "\n")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    # remove literal newlines/tabs (FFmpeg filtergraph cannot contain raw newlines safely)
     text = text.replace("\t", " ")
-    text = re.sub(r"\n+", " ", text)
-
-    # collapse repeated spaces
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text
-
-
-def escape_drawtext(text: str) -> str:
-    """
-    Escape for FFmpeg drawtext when using text='...'
-    """
-    text = sanitize_text(text)
-    text = text.replace("\\", "\\\\")
-    text = text.replace("'", "\\'")
-    text = text.replace(":", "\\:")
-    text = text.replace("%", "\\%")
-    text = text.replace(",", "\\,")
-    text = text.replace(";", "\\;")
-    text = text.replace("[", "\\[")
-    text = text.replace("]", "\\]")
-    # we will insert \n in wrapping functions and then escape it here:
-    text = text.replace("\n", "\\n")
-    return text
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
 
 def wrap_lines(text: str, max_chars: int, max_lines: int) -> str:
-    """
-    Word-wrap text into up to max_lines lines with max_chars each.
-    Returns a string with real '\n' newlines (later escaped to \\n).
-    """
     text = sanitize_text(text)
+    if not text:
+        return ""
+
     words = text.split()
-    lines: List[str] = []
+    lines = []
     cur = ""
 
     for w in words:
@@ -109,7 +79,6 @@ def wrap_title(title: str) -> str:
 
 
 def wrap_caption(text: str) -> str:
-    # captions can be a bit wider; keep to 3 lines max
     return wrap_lines(text, max_chars=36, max_lines=3)
 
 
@@ -118,12 +87,11 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    # sentence-ish split
     parts = [p.strip() for p in s.replace("?", "?.").replace("!", "!.").split(".") if p.strip()]
     if len(parts) <= 1:
         return [s]
 
-    chunks: List[str] = []
+    chunks = []
     cur = ""
     for sent in parts:
         candidate = (cur + " " + sent).strip()
@@ -133,6 +101,7 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
             if cur:
                 chunks.append(cur)
             cur = sent
+
     if cur:
         chunks.append(cur)
 
@@ -167,6 +136,17 @@ def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, 
     return timings
 
 
+def ffmpeg_path_escape(p: Path) -> str:
+    """
+    FFmpeg filter args treat ':' specially in options, but textfile= is an option value.
+    Safest: escape backslashes and colons.
+    """
+    s = str(p)
+    s = s.replace("\\", "\\\\")
+    s = s.replace(":", "\\:")
+    return s
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", required=True)
@@ -184,6 +164,19 @@ def main():
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
+    # Write caption files (THIS eliminates drawtext escaping issues)
+    cap_dir = Path("out/captions")
+    cap_dir.mkdir(parents=True, exist_ok=True)
+
+    title_file = cap_dir / "title.txt"
+    title_file.write_text(title_wrapped, encoding="utf-8")
+
+    caption_files = []
+    for i, chunk in enumerate(chunks, start=1):
+        f = cap_dir / f"cap_{i:02d}.txt"
+        f.write_text(wrap_caption(chunk), encoding="utf-8")
+        caption_files.append(f)
+
     # Animated professional background
     bg = (
         f"[0:v][1:v]blend=all_expr='A*(0.55+0.15*sin(2*PI*t/{dur})) + B*(0.45-0.15*sin(2*PI*t/{dur}))',"
@@ -192,11 +185,10 @@ def main():
         f"[bg]"
     )
 
-    # Title
-    safe_title = escape_drawtext(title_wrapped)
+    # Title using textfile
     title_filter = (
         f"[bg]drawtext=fontfile={FONT_BOLD}:"
-        f"text='{safe_title}':"
+        f"textfile={ffmpeg_path_escape(title_file)}:"
         f"fontcolor=white:fontsize=64:"
         f"x=(w-text_w)/2:y=180:"
         f"line_spacing=12:"
@@ -204,22 +196,20 @@ def main():
         f"[v1]"
     )
 
-    # Captions: chain with labels + semicolons (most robust)
+    # Captions chained with labels; enable uses escaped commas to avoid any ambiguity
     caption_chain_parts = []
     in_label = "v1"
-    for i, (chunk, (ts, te)) in enumerate(zip(chunks, times), start=1):
+    for i, (fpath, (ts, te)) in enumerate(zip(caption_files, times), start=1):
         out_label = f"c{i}"
-        wrapped = wrap_caption(chunk)             # <= creates safe '\n'
-        c = escape_drawtext(wrapped)              # <= escapes to \\n
-        enable_expr = f"between(t,{ts:.3f},{te:.3f})"
+        enable_expr = f"between(t\\,{ts:.3f}\\,{te:.3f})"
         caption_chain_parts.append(
             f"[{in_label}]drawtext=fontfile={FONT_REG}:"
-            f"text='{c}':"
+            f"textfile={ffmpeg_path_escape(fpath)}:"
             f"fontcolor=white:fontsize=48:"
             f"x=(w-text_w)/2:y=1120:"
             f"line_spacing=10:"
             f"box=1:boxcolor=black@0.28:boxborderw=22:"
-            f"enable='{enable_expr}'"
+            f"enable={enable_expr}"
             f"[{out_label}]"
         )
         in_label = out_label
