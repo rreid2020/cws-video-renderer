@@ -17,25 +17,31 @@ def run(cmd):
 
 
 def ffprobe_duration(audio_path: str) -> float:
-    out = subprocess.check_output(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
-        ],
-        text=True,
-    ).strip()
-    return float(out)
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            text=True,
+        ).strip()
+        return float(out)
+    except Exception:
+        return 0.0
 
 
 def normalize_quotes(text: str) -> str:
     return (
         text.replace("’", "'")
-            .replace("‘", "'")
-            .replace("“", '"')
-            .replace("”", '"')
+        .replace("‘", "'")
+        .replace("“", '"')
+        .replace("”", '"')
     )
 
 
@@ -87,7 +93,8 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    parts = [p.strip() for p in s.replace("?", "?.").replace("!", "!.").split(".") if p.strip()]
+    # Split into sentences on punctuation followed by whitespace (more robust than splitting on ".")
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
     if len(parts) <= 1:
         return [s]
 
@@ -109,7 +116,7 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
         best_i = 0
         best_len = 10**9
         for i in range(len(chunks) - 1):
-            merged_len = len(chunks[i]) + len(chunks[i + 1])
+            merged_len = len(chunks[i]) + 1 + len(chunks[i + 1])
             if merged_len < best_len:
                 best_len = merged_len
                 best_i = i
@@ -119,7 +126,12 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     return chunks
 
 
-def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, tail_out: float = 0.2) -> List[Tuple[float, float]]:
+def allocate_timings(
+    chunks: List[str],
+    total_dur: float,
+    lead_in: float = 0.4,
+    tail_out: float = 0.2,
+) -> List[Tuple[float, float]]:
     available = max(0.5, total_dur - lead_in - tail_out)
     weights = [max(3, len(sanitize_text(c).split())) for c in chunks]
     wsum = sum(weights) if weights else 1
@@ -137,10 +149,12 @@ def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, 
 
 
 def ffmpeg_path_escape(p: Path) -> str:
-    # Escape backslashes and colons for FFmpeg filter option values
+    # Escape for FFmpeg filter option values
     s = str(p)
     s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
+    s = s.replace(" ", "\\ ")
+    s = s.replace("'", "\\'")
     return s
 
 
@@ -162,8 +176,11 @@ def main():
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
-    # Write caption files (avoids drawtext escaping issues completely)
-    cap_dir = Path("out/captions")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write caption files (avoids drawtext escaping issues)
+    cap_dir = out.parent / "captions"
     cap_dir.mkdir(parents=True, exist_ok=True)
 
     title_file = cap_dir / "title.txt"
@@ -175,10 +192,11 @@ def main():
         f.write_text(wrap_caption(chunk), encoding="utf-8")
         caption_files.append(f)
 
-    # Animated background (NO quoted all_expr; use integer DUR_EXPR everywhere)
+    # Animated background (NO quotes around all_expr; use integer DUR_EXPR everywhere)
     bg = (
         f"[0:v][1:v]"
-        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
+        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
+        f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
         f"noise=alls=12:allf=t+u,"
         f"scale={W+40}:{H+40},"
         f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
@@ -212,7 +230,7 @@ def main():
         )
         in_label = out_label
 
-    # Progress bar (also use DUR_EXPR, not decimals)
+    # Progress bar (use DUR_EXPR, not decimals)
     progress = (
         f"[{in_label}]drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
         f"drawbox=x=120:y=h-140:w='(w-240)*t/{DUR_EXPR}':h=10:color=#FF7A18@0.95:t=fill"
@@ -221,24 +239,38 @@ def main():
 
     filter_complex = ";".join([bg, title_filter] + caption_chain_parts + [progress])
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    run([
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=#0B1F33:s={W}x{H}:r={FPS}",
-        "-f", "lavfi", "-i", f"color=c=#081827:s={W}x{H}:r={FPS}",
-        "-i", args.audio,
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "2:a",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
-        "-c:a", "aac",
-        "-shortest",
-        str(out)
-    ])
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=#0B1F33:s={W}x{H}:r={FPS}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=#081827:s={W}x{H}:r={FPS}",
+            "-i",
+            args.audio,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(FPS),
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(out),
+        ]
+    )
 
     print(f"✅ Rendered MP4: {out}")
 
