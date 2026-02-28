@@ -93,7 +93,6 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    # Robust-ish sentence split: punctuation followed by whitespace
     parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
     if len(parts) <= 1:
         return [s]
@@ -170,7 +169,7 @@ def main():
     script = data.get("script") or ""
 
     dur = max(8.0, ffprobe_duration(args.audio))
-    DUR_EXPR = max(8, int(round(dur)))  # integer for FFmpeg expressions (FFmpeg 4.4-safe)
+    DUR_EXPR = max(8, int(round(dur)))  # integer for FFmpeg expressions
 
     title_wrapped = wrap_title(title)
     chunks = split_script_into_chunks(script, target_chunks=8)
@@ -179,7 +178,7 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write caption files (avoids drawtext escaping issues)
+    # caption files
     cap_dir = out.parent / "captions"
     cap_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,16 +191,13 @@ def main():
         f.write_text(wrap_caption(chunk), encoding="utf-8")
         caption_files.append(f)
 
-    # ---------------------------------------------------------------------
-    # COPILOT-STYLE FIX:
-    # Build bg as ONE f-string (no implicit concat ambiguity, no tuple risk),
-    # and ensure ALL math operators are explicit (* between constants, PI, t,
-    # and sin/cos; and B*... not B(...)).
-    # ---------------------------------------------------------------------
+    # IMPORTANT:
+    # - blend expressions use time variable `T` (NOT `t`)
+    # - keep this as one continuous string (Copilot fix)
     bg = (
         f"[0:v][1:v]"
-        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
-        f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
+        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*T/{DUR_EXPR}))"
+        f"+B*(0.5-0.5*sin(2*PI*T/{DUR_EXPR})),"
         f"noise=alls=12:allf=t+u,"
         f"scale={W+40}:{H+40},"
         f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
@@ -235,9 +231,10 @@ def main():
         )
         in_label = out_label
 
+    # drawbox expressions: use iw/ih (not w/h) for compatibility
     progress = (
-        f"[{in_label}]drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
-        f"drawbox=x=120:y=h-140:w='(w-240)*t/{DUR_EXPR}':h=10:color=#FF7A18@0.95:t=fill"
+        f"[{in_label}]drawbox=x=120:y=ih-140:w=iw-240:h=10:color=white@0.10:t=fill,"
+        f"drawbox=x=120:y=ih-140:w='(iw-240)*t/{DUR_EXPR}':h=10:color=#FF7A18@0.95:t=fill"
         f"[vout]"
     )
 
@@ -247,14 +244,17 @@ def main():
         [
             "ffmpeg",
             "-y",
+            "-v",
+            "error",
+            "-stats",
             "-f",
             "lavfi",
             "-i",
-            f"color=c=#0B1F33:s={W}x{H}:r={FPS}",
+            f"color=c=#0B1F33:s={W}x{H}:r={FPS}:d={DUR_EXPR}",
             "-f",
             "lavfi",
             "-i",
-            f"color=c=#081827:s={W}x{H}:r={FPS}",
+            f"color=c=#081827:s={W}x{H}:r={FPS}:d={DUR_EXPR}",
             "-i",
             args.audio,
             "-filter_complex",
