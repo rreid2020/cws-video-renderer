@@ -17,6 +17,7 @@ def run(cmd):
 
 
 def ffprobe_duration(audio_path: str) -> float:
+    """Return audio duration in seconds. Fallback to 0.0 if ffprobe fails."""
     try:
         out = subprocess.check_output(
             [
@@ -60,7 +61,7 @@ def wrap_lines(text: str, max_chars: int, max_lines: int) -> str:
         return ""
 
     words = text.split()
-    lines = []
+    lines: List[str] = []
     cur = ""
 
     for w in words:
@@ -93,12 +94,12 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    # Split into sentences on punctuation followed by whitespace (more robust than splitting on ".")
+    # More robust sentence split than ".split('.')"
     parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
     if len(parts) <= 1:
         return [s]
 
-    chunks = []
+    chunks: List[str] = []
     cur = ""
     for sent in parts:
         candidate = (cur + " " + sent).strip()
@@ -112,6 +113,7 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if cur:
         chunks.append(cur)
 
+    # Merge shortest adjacent chunks until we hit target
     while len(chunks) > target_chunks:
         best_i = 0
         best_len = 10**9
@@ -136,7 +138,7 @@ def allocate_timings(
     weights = [max(3, len(sanitize_text(c).split())) for c in chunks]
     wsum = sum(weights) if weights else 1
 
-    timings = []
+    timings: List[Tuple[float, float]] = []
     t = lead_in
     for w in weights:
         dt = available * (w / wsum)
@@ -149,7 +151,10 @@ def allocate_timings(
 
 
 def ffmpeg_path_escape(p: Path) -> str:
-    # Escape for FFmpeg filter option values
+    """
+    Escape path for FFmpeg filter option values (textfile=...).
+    Handles backslashes, colons, spaces, and single quotes.
+    """
     s = str(p)
     s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
@@ -186,21 +191,23 @@ def main():
     title_file = cap_dir / "title.txt"
     title_file.write_text(title_wrapped, encoding="utf-8")
 
-    caption_files = []
+    caption_files: List[Path] = []
     for i, chunk in enumerate(chunks, start=1):
         f = cap_dir / f"cap_{i:02d}.txt"
         f.write_text(wrap_caption(chunk), encoding="utf-8")
         caption_files.append(f)
 
-    # Animated background (NO quotes around all_expr; use integer DUR_EXPR everywhere)
+    # Animated background:
+    # - Ensures correct FFmpeg expression syntax (* between coefficients and sin/cos)
+    # - Ensures bg is a SINGLE STRING (uses + concatenation to avoid accidental tuples)
     bg = (
         f"[0:v][1:v]"
-        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
-        f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
-        f"noise=alls=12:allf=t+u,"
-        f"scale={W+40}:{H+40},"
-        f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
-        f"[bg]"
+        + f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
+          f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
+        + "noise=alls=12:allf=t+u,"
+        + f"scale={W+40}:{H+40},"
+        + f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
+        + "[bg]"
     )
 
     title_filter = (
@@ -213,7 +220,7 @@ def main():
         f"[v1]"
     )
 
-    caption_chain_parts = []
+    caption_chain_parts: List[str] = []
     in_label = "v1"
     for i, (fpath, (ts, te)) in enumerate(zip(caption_files, times), start=1):
         out_label = f"c{i}"
