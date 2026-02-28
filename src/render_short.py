@@ -17,7 +17,6 @@ def run(cmd):
 
 
 def ffprobe_duration(audio_path: str) -> float:
-    """Return audio duration in seconds. Fallback to 0.0 if ffprobe fails."""
     try:
         out = subprocess.check_output(
             [
@@ -94,7 +93,7 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if not s:
         return []
 
-    # More robust sentence split than ".split('.')"
+    # Robust-ish sentence split: punctuation followed by whitespace
     parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
     if len(parts) <= 1:
         return [s]
@@ -113,7 +112,6 @@ def split_script_into_chunks(script: str, target_chunks: int = 8) -> List[str]:
     if cur:
         chunks.append(cur)
 
-    # Merge shortest adjacent chunks until we hit target
     while len(chunks) > target_chunks:
         best_i = 0
         best_len = 10**9
@@ -151,10 +149,7 @@ def allocate_timings(
 
 
 def ffmpeg_path_escape(p: Path) -> str:
-    """
-    Escape path for FFmpeg filter option values (textfile=...).
-    Handles backslashes, colons, spaces, and single quotes.
-    """
+    # Escape for FFmpeg filter option values (textfile=)
     s = str(p)
     s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
@@ -197,17 +192,20 @@ def main():
         f.write_text(wrap_caption(chunk), encoding="utf-8")
         caption_files.append(f)
 
-    # Animated background:
-    # - Ensures correct FFmpeg expression syntax (* between coefficients and sin/cos)
-    # - Ensures bg is a SINGLE STRING (uses + concatenation to avoid accidental tuples)
+    # ---------------------------------------------------------------------
+    # COPILOT-STYLE FIX:
+    # Build bg as ONE f-string (no implicit concat ambiguity, no tuple risk),
+    # and ensure ALL math operators are explicit (* between constants, PI, t,
+    # and sin/cos; and B*... not B(...)).
+    # ---------------------------------------------------------------------
     bg = (
         f"[0:v][1:v]"
-        + f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
-          f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
-        + "noise=alls=12:allf=t+u,"
-        + f"scale={W+40}:{H+40},"
-        + f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
-        + "[bg]"
+        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))"
+        f"+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
+        f"noise=alls=12:allf=t+u,"
+        f"scale={W+40}:{H+40},"
+        f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
+        f"[bg]"
     )
 
     title_filter = (
@@ -237,7 +235,6 @@ def main():
         )
         in_label = out_label
 
-    # Progress bar (use DUR_EXPR, not decimals)
     progress = (
         f"[{in_label}]drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
         f"drawbox=x=120:y=h-140:w='(w-240)*t/{DUR_EXPR}':h=10:color=#FF7A18@0.95:t=fill"
