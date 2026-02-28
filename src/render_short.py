@@ -137,10 +137,7 @@ def allocate_timings(chunks: List[str], total_dur: float, lead_in: float = 0.4, 
 
 
 def ffmpeg_path_escape(p: Path) -> str:
-    """
-    FFmpeg filter args treat ':' specially in options, but textfile= is an option value.
-    Safest: escape backslashes and colons.
-    """
+    # Escape backslashes and colons for FFmpeg filter option values
     s = str(p)
     s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
@@ -159,12 +156,13 @@ def main():
     script = data.get("script") or ""
 
     dur = max(8.0, ffprobe_duration(args.audio))
+    DUR_EXPR = max(8, int(round(dur)))  # integer for FFmpeg expressions (FFmpeg 4.4-safe)
 
     title_wrapped = wrap_title(title)
     chunks = split_script_into_chunks(script, target_chunks=8)
     times = allocate_timings(chunks, dur)
 
-    # Write caption files (THIS eliminates drawtext escaping issues)
+    # Write caption files (avoids drawtext escaping issues completely)
     cap_dir = Path("out/captions")
     cap_dir.mkdir(parents=True, exist_ok=True)
 
@@ -177,15 +175,16 @@ def main():
         f.write_text(wrap_caption(chunk), encoding="utf-8")
         caption_files.append(f)
 
-    # Animated professional background
+    # Animated background (NO quoted all_expr; use integer DUR_EXPR everywhere)
     bg = (
-        f"[0:v][1:v]blend=all_expr='A*(0.55+0.15*sin(2*PI*t/{dur})) + B*(0.45-0.15*sin(2*PI*t/{dur}))',"
+        f"[0:v][1:v]"
+        f"blend=all_expr=A*(0.5+0.5*sin(2*PI*t/{DUR_EXPR}))+B*(0.5-0.5*sin(2*PI*t/{DUR_EXPR})),"
         f"noise=alls=12:allf=t+u,"
-        f"scale={W+40}:{H+40},crop={W}:{H}:x='20+10*sin(2*PI*t/{dur})':y='20+10*cos(2*PI*t/{dur})'"
+        f"scale={W+40}:{H+40},"
+        f"crop={W}:{H}:x='20+10*sin(2*PI*t/{DUR_EXPR})':y='20+10*cos(2*PI*t/{DUR_EXPR})'"
         f"[bg]"
     )
 
-    # Title using textfile
     title_filter = (
         f"[bg]drawtext=fontfile={FONT_BOLD}:"
         f"textfile={ffmpeg_path_escape(title_file)}:"
@@ -196,7 +195,6 @@ def main():
         f"[v1]"
     )
 
-    # Captions chained with labels; enable uses escaped commas to avoid any ambiguity
     caption_chain_parts = []
     in_label = "v1"
     for i, (fpath, (ts, te)) in enumerate(zip(caption_files, times), start=1):
@@ -214,10 +212,10 @@ def main():
         )
         in_label = out_label
 
-    # Progress bar
+    # Progress bar (also use DUR_EXPR, not decimals)
     progress = (
         f"[{in_label}]drawbox=x=120:y=h-140:w=w-240:h=10:color=white@0.10:t=fill,"
-        f"drawbox=x=120:y=h-140:w='(w-240)*t/{dur}':h=10:color=#FF7A18@0.95:t=fill"
+        f"drawbox=x=120:y=h-140:w='(w-240)*t/{DUR_EXPR}':h=10:color=#FF7A18@0.95:t=fill"
         f"[vout]"
     )
 
